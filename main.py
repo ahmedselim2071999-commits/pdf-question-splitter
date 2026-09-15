@@ -13,6 +13,7 @@ def home():
     <html>
     <head>
         <title>PDF Question Splitter</title>
+
         <style>
             body {
                 font-family: Arial, sans-serif;
@@ -81,7 +82,7 @@ def home():
                 <br>
 
                 <button type="submit">
-                    Upload PDF
+                    Analyze PDF
                 </button>
 
             </form>
@@ -93,13 +94,16 @@ def home():
     """
 
 
-@app.post("/upload")
+@app.post("/upload", response_class=HTMLResponse)
 async def upload_pdf(file: UploadFile = File(...)):
 
     if not file.filename.lower().endswith(".pdf"):
-        return {"error": "Please upload a PDF file."}
+        return """
+        <h2>❌ Please upload a PDF file.</h2>
+        """
 
     os.makedirs("uploads", exist_ok=True)
+    os.makedirs("rendered", exist_ok=True)
 
     file_path = os.path.join("uploads", file.filename)
 
@@ -109,12 +113,96 @@ async def upload_pdf(file: UploadFile = File(...)):
     # Open PDF
     pdf = fitz.open(file_path)
 
-    pages = len(pdf)
+    page_count = len(pdf)
+
+    # Render first page at high quality
+    page = pdf[0]
+
+    matrix = fitz.Matrix(2.5, 2.5)
+
+    pix = page.get_pixmap(
+        matrix=matrix,
+        alpha=False
+    )
+
+    image_path = os.path.join(
+        "rendered",
+        "page_1.png"
+    )
+
+    pix.save(image_path)
 
     pdf.close()
 
-    return {
-        "filename": file.filename,
-        "pages": pages,
-        "message": "PDF uploaded successfully."
-    }
+    return f"""
+    <!DOCTYPE html>
+    <html>
+
+    <head>
+        <title>PDF Analysis</title>
+
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                background: #f4f6f8;
+                text-align: center;
+                padding: 40px;
+            }}
+
+            .box {{
+                background: white;
+                max-width: 900px;
+                margin: auto;
+                padding: 30px;
+                border-radius: 15px;
+                box-shadow: 0 5px 25px rgba(0,0,0,0.1);
+            }}
+
+            img {{
+                max-width: 100%;
+                border: 1px solid #ddd;
+                margin-top: 25px;
+            }}
+        </style>
+
+    </head>
+
+    <body>
+
+        <div class="box">
+
+            <h1>✅ PDF Loaded Successfully</h1>
+
+            <p>
+                Pages detected: <strong>{page_count}</strong>
+            </p>
+
+            <p>
+                First page rendered successfully.
+            </p>
+
+            <img src="/preview" />
+
+        </div>
+
+    </body>
+    </html>
+    """
+
+
+@app.get("/preview")
+def preview():
+
+    from fastapi.responses import FileResponse
+
+    image_path = "rendered/page_1.png"
+
+    if not os.path.exists(image_path):
+        return {
+            "error": "Preview image not found."
+        }
+
+    return FileResponse(
+        image_path,
+        media_type="image/png"
+    )
