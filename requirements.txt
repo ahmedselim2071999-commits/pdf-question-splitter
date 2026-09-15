@@ -1,8 +1,7 @@
 fastapi
-uvicorn[standard]
+uvicorn
 python-multipart
 PyMuPDF
-Pillow
 opencv-python-headless
+numpy
 python-pptx
-pytesseract
