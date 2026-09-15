@@ -29,25 +29,16 @@ CROP_DIR = "crops"
 PPT_DIR = "powerpoints"
 
 
-os.makedirs(
+for folder in [
     UPLOAD_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
     RENDER_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
     CROP_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    PPT_DIR,
-    exist_ok=True
-)
+    PPT_DIR
+]:
+    os.makedirs(
+        folder,
+        exist_ok=True
+    )
 
 
 # =========================================================
@@ -162,7 +153,7 @@ def home():
 
 
 # =========================================================
-# DETECT MAIN QUESTION NUMBER BOXES
+# DETECT QUESTION NUMBER BOXES
 # =========================================================
 
 def detect_question_boxes(image_path):
@@ -179,7 +170,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # Convert to HSV
+    # HSV
     # -----------------------------------------------------
 
     hsv = cv2.cvtColor(
@@ -189,7 +180,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # RED COLOR RANGE
+    # RED MASK
     # -----------------------------------------------------
 
     lower_red_1 = np.array(
@@ -228,7 +219,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # MORPHOLOGICAL CLEANUP
+    # CLEAN MASK
     # -----------------------------------------------------
 
     kernel = np.ones(
@@ -265,10 +256,10 @@ def detect_question_boxes(image_path):
         )
 
 
-        box_area = w * h
+        area = w * h
 
 
-        if box_area <= 0:
+        if area <= 0:
             continue
 
 
@@ -279,7 +270,7 @@ def detect_question_boxes(image_path):
 
         fill_ratio = (
             contour_area /
-            float(box_area)
+            float(area)
         )
 
 
@@ -290,7 +281,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # SIZE FILTER
+        # SIZE
         # -------------------------------------------------
 
         if w < 25 or h < 25:
@@ -302,7 +293,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # SQUARE FILTER
+        # SHAPE
         # -------------------------------------------------
 
         if aspect_ratio < 0.70:
@@ -314,7 +305,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # FILLED BOX FILTER
+        # FILLED RED BOX
         # -------------------------------------------------
 
         if fill_ratio < 0.55:
@@ -322,7 +313,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # MAIN QUESTION BOXES ARE ON LEFT SIDE
+        # LEFT SIDE
         # -------------------------------------------------
 
         if x > width * 0.25:
@@ -330,7 +321,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # IGNORE TOP HEADER
+        # IGNORE HEADER
         # -------------------------------------------------
 
         if y < height * 0.15:
@@ -341,18 +332,16 @@ def detect_question_boxes(image_path):
             "x": x,
             "y": y,
             "w": w,
-            "h": h,
-            "area": box_area,
-            "fill_ratio": fill_ratio
+            "h": h
         })
 
 
     # -----------------------------------------------------
-    # SORT TOP → BOTTOM
+    # SORT
     # -----------------------------------------------------
 
     candidates.sort(
-        key=lambda item: item["y"]
+        key=lambda q: q["y"]
     )
 
 
@@ -375,9 +364,7 @@ def detect_question_boxes(image_path):
                     candidate["x"] -
                     existing["x"]
                 ) < 25
-
                 and
-
                 abs(
                     candidate["y"] -
                     existing["y"]
@@ -385,7 +372,6 @@ def detect_question_boxes(image_path):
             ):
 
                 duplicate = True
-
                 break
 
 
@@ -396,16 +382,184 @@ def detect_question_boxes(image_path):
             )
 
 
+    return questions
+
+
+# =========================================================
+# SMART CONTENT BOUNDARY
+# =========================================================
+
+def find_content_bounds(
+    crop
+):
+
+    if crop is None:
+        return crop
+
+
+    if crop.size == 0:
+        return crop
+
+
     # -----------------------------------------------------
-    # FINAL SORT
+    # GRAYSCALE
     # -----------------------------------------------------
 
-    questions.sort(
-        key=lambda item: item["y"]
+    gray = cv2.cvtColor(
+        crop,
+        cv2.COLOR_BGR2GRAY
     )
 
 
-    return questions
+    # -----------------------------------------------------
+    # DARK PIXELS
+    #
+    # Ignore very light watermark/background
+    # -----------------------------------------------------
+
+    dark_mask = (
+        gray < 220
+    ).astype(
+        np.uint8
+    ) * 255
+
+
+    # -----------------------------------------------------
+    # REMOVE SMALL NOISE
+    # -----------------------------------------------------
+
+    kernel = np.ones(
+        (3, 3),
+        np.uint8
+    )
+
+
+    dark_mask = cv2.morphologyEx(
+        dark_mask,
+        cv2.MORPH_OPEN,
+        kernel
+    )
+
+
+    # -----------------------------------------------------
+    # ROW ACTIVITY
+    # -----------------------------------------------------
+
+    row_counts = np.sum(
+        dark_mask > 0,
+        axis=1
+    )
+
+
+    col_counts = np.sum(
+        dark_mask > 0,
+        axis=0
+    )
+
+
+    # -----------------------------------------------------
+    # FIND ACTIVE ROWS
+    # -----------------------------------------------------
+
+    min_row_pixels = max(
+        5,
+        int(crop.shape[1] * 0.001)
+    )
+
+
+    active_rows = np.where(
+        row_counts > min_row_pixels
+    )[0]
+
+
+    if len(active_rows) == 0:
+        return crop
+
+
+    top = int(
+        active_rows[0]
+    )
+
+
+    bottom = int(
+        active_rows[-1]
+    )
+
+
+    # -----------------------------------------------------
+    # FIND ACTIVE COLUMNS
+    # -----------------------------------------------------
+
+    min_col_pixels = max(
+        5,
+        int(crop.shape[0] * 0.001)
+    )
+
+
+    active_cols = np.where(
+        col_counts > min_col_pixels
+    )[0]
+
+
+    if len(active_cols) > 0:
+
+        left = int(
+            active_cols[0]
+        )
+
+        right = int(
+            active_cols[-1]
+        )
+
+    else:
+
+        left = 0
+        right = crop.shape[1] - 1
+
+
+    # -----------------------------------------------------
+    # SAFETY MARGIN
+    # -----------------------------------------------------
+
+    margin_x = 25
+    margin_y = 25
+
+
+    left = max(
+        0,
+        left - margin_x
+    )
+
+
+    right = min(
+        crop.shape[1] - 1,
+        right + margin_x
+    )
+
+
+    top = max(
+        0,
+        top - margin_y
+    )
+
+
+    bottom = min(
+        crop.shape[0] - 1,
+        bottom + margin_y
+    )
+
+
+    # -----------------------------------------------------
+    # FINAL CROP
+    # -----------------------------------------------------
+
+    result = crop[
+        top:bottom + 1,
+        left:right + 1
+    ]
+
+
+    return result
 
 
 # =========================================================
@@ -439,17 +593,17 @@ def crop_questions(
 
 
         # -------------------------------------------------
-        # START
+        # TOP
         # -------------------------------------------------
 
         top = max(
             0,
-            question["y"] - 25
+            question["y"] - 30
         )
 
 
         # -------------------------------------------------
-        # END
+        # BOTTOM
         # -------------------------------------------------
 
         if index < len(questions) - 1:
@@ -461,12 +615,39 @@ def crop_questions(
 
             bottom = max(
                 top + 100,
-                next_question["y"] - 20
+                next_question["y"] - 25
             )
 
         else:
 
-            bottom = height - 25
+            # ---------------------------------------------
+            # Last question
+            # Don't automatically use entire page
+            # ---------------------------------------------
+
+            bottom = height - 20
+
+
+        # -------------------------------------------------
+        # LEFT
+        # -------------------------------------------------
+
+        left = max(
+            0,
+            question["x"] - 30
+        )
+
+
+        # -------------------------------------------------
+        # RIGHT
+        #
+        # Keep most of question area but remove
+        # extreme right-side watermark area
+        # -------------------------------------------------
+
+        right = int(
+            width * 0.94
+        )
 
 
         # -------------------------------------------------
@@ -477,29 +658,49 @@ def crop_questions(
             continue
 
 
+        if right <= left:
+            continue
+
+
         # -------------------------------------------------
-        # CROP
+        # INITIAL CROP
         # -------------------------------------------------
 
         crop = image[
             top:bottom,
-            0:width
+            left:right
         ]
 
 
+        if crop.size == 0:
+            continue
+
+
         # -------------------------------------------------
-        # FILE NAME
+        # SMART TRIM
         # -------------------------------------------------
 
-        crop_path = os.path.join(
-            CROP_DIR,
-            f"page_{page_number}_question_{index + 1}.png"
+        crop = find_content_bounds(
+            crop
         )
+
+
+        if crop.size == 0:
+            continue
 
 
         # -------------------------------------------------
         # SAVE
         # -------------------------------------------------
+
+        crop_path = os.path.join(
+            CROP_DIR,
+            (
+                f"page_{page_number}"
+                f"_question_{index + 1}.png"
+            )
+        )
+
 
         cv2.imwrite(
             crop_path,
@@ -526,15 +727,11 @@ def create_powerpoint(
     output_path
 ):
 
-    # -----------------------------------------------------
-    # CREATE PRESENTATION
-    # -----------------------------------------------------
-
     prs = Presentation()
 
 
     # -----------------------------------------------------
-    # 16:9 WIDESCREEN
+    # 16:9
     # -----------------------------------------------------
 
     prs.slide_width = Inches(
@@ -546,24 +743,12 @@ def create_powerpoint(
     )
 
 
-    # -----------------------------------------------------
-    # CREATE ONE SLIDE PER QUESTION
-    # -----------------------------------------------------
-
     for question in questions:
-
-        # -------------------------------------------------
-        # BLANK SLIDE
-        # -------------------------------------------------
 
         slide = prs.slides.add_slide(
             prs.slide_layouts[6]
         )
 
-
-        # -------------------------------------------------
-        # IMAGE
-        # -------------------------------------------------
 
         image_path = question["path"]
 
@@ -573,10 +758,6 @@ def create_powerpoint(
         ):
             continue
 
-
-        # -------------------------------------------------
-        # GET IMAGE SIZE
-        # -------------------------------------------------
 
         image = cv2.imread(
             image_path
@@ -592,10 +773,6 @@ def create_powerpoint(
         )
 
 
-        # -------------------------------------------------
-        # POWERPOINT DIMENSIONS
-        # -------------------------------------------------
-
         slide_width = (
             prs.slide_width
         )
@@ -606,28 +783,28 @@ def create_powerpoint(
 
 
         # -------------------------------------------------
-        # SMALL MARGIN
+        # SLIDE MARGIN
         # -------------------------------------------------
 
         margin = Inches(
-            0.15
+            0.30
         )
 
 
         available_width = (
             slide_width -
-            (margin * 2)
+            margin * 2
         )
 
 
         available_height = (
             slide_height -
-            (margin * 2)
+            margin * 2
         )
 
 
         # -------------------------------------------------
-        # IMAGE ASPECT RATIO
+        # IMAGE RATIO
         # -------------------------------------------------
 
         image_ratio = (
@@ -636,49 +813,41 @@ def create_powerpoint(
         )
 
 
-        slide_ratio = (
+        available_ratio = (
             available_width /
             float(available_height)
         )
 
 
         # -------------------------------------------------
-        # FIT IMAGE INSIDE SLIDE
+        # FIT IMAGE
         # -------------------------------------------------
 
-        if image_ratio > slide_ratio:
-
-            # Image is wider
+        if image_ratio > available_ratio:
 
             final_width = (
                 available_width
             )
 
-            final_height = (
-                int(
-                    available_width /
-                    image_ratio
-                )
+            final_height = int(
+                available_width /
+                image_ratio
             )
 
         else:
-
-            # Image is taller
 
             final_height = (
                 available_height
             )
 
-            final_width = (
-                int(
-                    available_height *
-                    image_ratio
-                )
+            final_width = int(
+                available_height *
+                image_ratio
             )
 
 
         # -------------------------------------------------
-        # CENTER IMAGE
+        # CENTER
         # -------------------------------------------------
 
         left = int(
@@ -711,7 +880,7 @@ def create_powerpoint(
 
 
     # -----------------------------------------------------
-    # SAVE POWERPOINT
+    # SAVE
     # -----------------------------------------------------
 
     prs.save(
@@ -734,9 +903,8 @@ async def upload_pdf(
     file: UploadFile = File(...)
 ):
 
-
     # -----------------------------------------------------
-    # CHECK FILE
+    # CHECK PDF
     # -----------------------------------------------------
 
     if not file.filename.lower().endswith(
@@ -749,13 +917,11 @@ async def upload_pdf(
 
 
     # -----------------------------------------------------
-    # CREATE SAFE FILE NAME
+    # SAFE NAME
     # -----------------------------------------------------
 
-    safe_name = (
-        os.path.basename(
-            file.filename
-        )
+    safe_name = os.path.basename(
+        file.filename
     )
 
 
@@ -766,7 +932,7 @@ async def upload_pdf(
 
 
     # -----------------------------------------------------
-    # SAVE PDF
+    # SAVE
     # -----------------------------------------------------
 
     with open(
@@ -797,7 +963,7 @@ async def upload_pdf(
 
 
     # =====================================================
-    # PROCESS EVERY PAGE
+    # PROCESS PAGES
     # =====================================================
 
     for page_index in range(
@@ -863,21 +1029,19 @@ async def upload_pdf(
 
 
         # -------------------------------------------------
-        # ADD TO ALL QUESTIONS
+        # STORE
         # -------------------------------------------------
 
-        for crop in crops:
-
-            all_questions.append(
-                crop
-            )
+        all_questions.extend(
+            crops
+        )
 
 
     pdf.close()
 
 
     # =====================================================
-    # CREATE POWERPOINT
+    # CREATE PPT
     # =====================================================
 
     ppt_filename = (
@@ -952,10 +1116,6 @@ async def upload_pdf(
                 margin-top: 15px;
             }}
 
-            .download:hover {{
-                background: #15803d;
-            }}
-
             .question {{
                 margin-top: 35px;
                 padding: 20px;
@@ -979,7 +1139,6 @@ async def upload_pdf(
 
         <div class="container">
 
-
             <h1>
                 🧠 Question Detection
             </h1>
@@ -1002,10 +1161,6 @@ async def upload_pdf(
     """
 
 
-    # -----------------------------------------------------
-    # POWERPOINT DOWNLOAD
-    # -----------------------------------------------------
-
     if all_questions:
 
         html += f"""
@@ -1018,7 +1173,6 @@ async def upload_pdf(
                 </a>
 
         """
-
 
     else:
 
@@ -1039,13 +1193,12 @@ async def upload_pdf(
 
 
     # =====================================================
-    # SHOW QUESTIONS
+    # QUESTION PREVIEWS
     # =====================================================
 
     for index, question in enumerate(
         all_questions
     ):
-
 
         filename = os.path.basename(
             question["path"]
@@ -1092,7 +1245,7 @@ async def upload_pdf(
 
 
 # =========================================================
-# SERVE CROP IMAGE
+# SERVE CROP
 # =========================================================
 
 @app.get(
@@ -1125,7 +1278,7 @@ def get_crop(
 
 
 # =========================================================
-# DOWNLOAD POWERPOINT
+# DOWNLOAD PPT
 # =========================================================
 
 @app.get(
