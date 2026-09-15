@@ -1,12 +1,22 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import HTMLResponse, FileResponse
+
 import fitz
 import os
 import cv2
 import numpy as np
 
+from pptx import Presentation
+from pptx.util import Inches
 
-app = FastAPI(title="PDF Question Splitter")
+
+# =========================================================
+# APP
+# =========================================================
+
+app = FastAPI(
+    title="PDF Question Splitter"
+)
 
 
 # =========================================================
@@ -16,17 +26,38 @@ app = FastAPI(title="PDF Question Splitter")
 UPLOAD_DIR = "uploads"
 RENDER_DIR = "rendered"
 CROP_DIR = "crops"
+PPT_DIR = "powerpoints"
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(RENDER_DIR, exist_ok=True)
-os.makedirs(CROP_DIR, exist_ok=True)
+
+os.makedirs(
+    UPLOAD_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    RENDER_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    CROP_DIR,
+    exist_ok=True
+)
+
+os.makedirs(
+    PPT_DIR,
+    exist_ok=True
+)
 
 
 # =========================================================
 # HOME PAGE
 # =========================================================
 
-@app.get("/", response_class=HTMLResponse)
+@app.get(
+    "/",
+    response_class=HTMLResponse
+)
 def home():
 
     return """
@@ -72,10 +103,10 @@ def home():
                 background: #2563eb;
                 color: white;
                 border: none;
-                padding: 12px 25px;
+                padding: 14px 28px;
                 border-radius: 8px;
                 cursor: pointer;
-                font-size: 16px;
+                font-size: 17px;
             }
 
             button:hover {
@@ -91,11 +122,13 @@ def home():
 
         <div class="box">
 
-            <h1>📚 PDF Question Splitter</h1>
+            <h1>
+                📚 PDF Question Splitter
+            </h1>
 
             <p>
-                Upload a PDF and automatically split
-                the main questions.
+                Upload a PDF containing questions
+                and automatically create a PowerPoint.
             </p>
 
 
@@ -115,7 +148,7 @@ def home():
                 <br><br>
 
                 <button type="submit">
-                    Analyze PDF
+                    🚀 Analyze PDF
                 </button>
 
             </form>
@@ -134,7 +167,9 @@ def home():
 
 def detect_question_boxes(image_path):
 
-    image = cv2.imread(image_path)
+    image = cv2.imread(
+        image_path
+    )
 
     if image is None:
         return []
@@ -144,7 +179,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # Convert image to HSV
+    # Convert to HSV
     # -----------------------------------------------------
 
     hsv = cv2.cvtColor(
@@ -154,7 +189,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # RED COLOR RANGES
+    # RED COLOR RANGE
     # -----------------------------------------------------
 
     lower_red_1 = np.array(
@@ -193,7 +228,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # CLOSE SMALL HOLES
+    # MORPHOLOGICAL CLEANUP
     # -----------------------------------------------------
 
     kernel = np.ones(
@@ -210,7 +245,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # FIND RED OBJECTS
+    # FIND CONTOURS
     # -----------------------------------------------------
 
     contours, _ = cv2.findContours(
@@ -279,7 +314,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # FILLED RED BOX
+        # FILLED BOX FILTER
         # -------------------------------------------------
 
         if fill_ratio < 0.55:
@@ -287,7 +322,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # LEFT SIDE
+        # MAIN QUESTION BOXES ARE ON LEFT SIDE
         # -------------------------------------------------
 
         if x > width * 0.25:
@@ -295,7 +330,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # DON'T DETECT HEADER
+        # IGNORE TOP HEADER
         # -------------------------------------------------
 
         if y < height * 0.15:
@@ -340,7 +375,9 @@ def detect_question_boxes(image_path):
                     candidate["x"] -
                     existing["x"]
                 ) < 25
+
                 and
+
                 abs(
                     candidate["y"] -
                     existing["y"]
@@ -377,7 +414,8 @@ def detect_question_boxes(image_path):
 
 def crop_questions(
     image_path,
-    questions
+    questions,
+    page_number
 ):
 
     image = cv2.imread(
@@ -401,7 +439,7 @@ def crop_questions(
 
 
         # -------------------------------------------------
-        # TOP OF QUESTION
+        # START
         # -------------------------------------------------
 
         top = max(
@@ -411,7 +449,7 @@ def crop_questions(
 
 
         # -------------------------------------------------
-        # BOTTOM OF QUESTION
+        # END
         # -------------------------------------------------
 
         if index < len(questions) - 1:
@@ -440,7 +478,7 @@ def crop_questions(
 
 
         # -------------------------------------------------
-        # CREATE CROP
+        # CROP
         # -------------------------------------------------
 
         crop = image[
@@ -450,14 +488,18 @@ def crop_questions(
 
 
         # -------------------------------------------------
-        # SAVE CROP
+        # FILE NAME
         # -------------------------------------------------
 
         crop_path = os.path.join(
             CROP_DIR,
-            f"question_{index + 1}.png"
+            f"page_{page_number}_question_{index + 1}.png"
         )
 
+
+        # -------------------------------------------------
+        # SAVE
+        # -------------------------------------------------
 
         cv2.imwrite(
             crop_path,
@@ -467,11 +509,217 @@ def crop_questions(
 
         crops.append({
             "number": index + 1,
+            "page": page_number,
             "path": crop_path
         })
 
 
     return crops
+
+
+# =========================================================
+# CREATE POWERPOINT
+# =========================================================
+
+def create_powerpoint(
+    questions,
+    output_path
+):
+
+    # -----------------------------------------------------
+    # CREATE PRESENTATION
+    # -----------------------------------------------------
+
+    prs = Presentation()
+
+
+    # -----------------------------------------------------
+    # 16:9 WIDESCREEN
+    # -----------------------------------------------------
+
+    prs.slide_width = Inches(
+        13.333
+    )
+
+    prs.slide_height = Inches(
+        7.5
+    )
+
+
+    # -----------------------------------------------------
+    # CREATE ONE SLIDE PER QUESTION
+    # -----------------------------------------------------
+
+    for question in questions:
+
+        # -------------------------------------------------
+        # BLANK SLIDE
+        # -------------------------------------------------
+
+        slide = prs.slides.add_slide(
+            prs.slide_layouts[6]
+        )
+
+
+        # -------------------------------------------------
+        # IMAGE
+        # -------------------------------------------------
+
+        image_path = question["path"]
+
+
+        if not os.path.exists(
+            image_path
+        ):
+            continue
+
+
+        # -------------------------------------------------
+        # GET IMAGE SIZE
+        # -------------------------------------------------
+
+        image = cv2.imread(
+            image_path
+        )
+
+
+        if image is None:
+            continue
+
+
+        image_height, image_width = (
+            image.shape[:2]
+        )
+
+
+        # -------------------------------------------------
+        # POWERPOINT DIMENSIONS
+        # -------------------------------------------------
+
+        slide_width = (
+            prs.slide_width
+        )
+
+        slide_height = (
+            prs.slide_height
+        )
+
+
+        # -------------------------------------------------
+        # SMALL MARGIN
+        # -------------------------------------------------
+
+        margin = Inches(
+            0.15
+        )
+
+
+        available_width = (
+            slide_width -
+            (margin * 2)
+        )
+
+
+        available_height = (
+            slide_height -
+            (margin * 2)
+        )
+
+
+        # -------------------------------------------------
+        # IMAGE ASPECT RATIO
+        # -------------------------------------------------
+
+        image_ratio = (
+            image_width /
+            float(image_height)
+        )
+
+
+        slide_ratio = (
+            available_width /
+            float(available_height)
+        )
+
+
+        # -------------------------------------------------
+        # FIT IMAGE INSIDE SLIDE
+        # -------------------------------------------------
+
+        if image_ratio > slide_ratio:
+
+            # Image is wider
+
+            final_width = (
+                available_width
+            )
+
+            final_height = (
+                int(
+                    available_width /
+                    image_ratio
+                )
+            )
+
+        else:
+
+            # Image is taller
+
+            final_height = (
+                available_height
+            )
+
+            final_width = (
+                int(
+                    available_height *
+                    image_ratio
+                )
+            )
+
+
+        # -------------------------------------------------
+        # CENTER IMAGE
+        # -------------------------------------------------
+
+        left = int(
+            (
+                slide_width -
+                final_width
+            ) / 2
+        )
+
+
+        top = int(
+            (
+                slide_height -
+                final_height
+            ) / 2
+        )
+
+
+        # -------------------------------------------------
+        # ADD IMAGE
+        # -------------------------------------------------
+
+        slide.shapes.add_picture(
+            image_path,
+            left,
+            top,
+            width=final_width,
+            height=final_height
+        )
+
+
+    # -----------------------------------------------------
+    # SAVE POWERPOINT
+    # -----------------------------------------------------
+
+    prs.save(
+        output_path
+    )
+
+
+    return output_path
 
 
 # =========================================================
@@ -488,7 +736,7 @@ async def upload_pdf(
 
 
     # -----------------------------------------------------
-    # CHECK PDF
+    # CHECK FILE
     # -----------------------------------------------------
 
     if not file.filename.lower().endswith(
@@ -501,14 +749,25 @@ async def upload_pdf(
 
 
     # -----------------------------------------------------
-    # SAVE PDF
+    # CREATE SAFE FILE NAME
     # -----------------------------------------------------
+
+    safe_name = (
+        os.path.basename(
+            file.filename
+        )
+    )
+
 
     file_path = os.path.join(
         UPLOAD_DIR,
-        file.filename
+        safe_name
     )
 
+
+    # -----------------------------------------------------
+    # SAVE PDF
+    # -----------------------------------------------------
 
     with open(
         file_path,
@@ -529,7 +788,9 @@ async def upload_pdf(
     )
 
 
-    page_count = len(pdf)
+    page_count = len(
+        pdf
+    )
 
 
     all_questions = []
@@ -542,6 +803,11 @@ async def upload_pdf(
     for page_index in range(
         page_count
     ):
+
+
+        page_number = (
+            page_index + 1
+        )
 
 
         page = pdf[
@@ -567,7 +833,7 @@ async def upload_pdf(
 
         page_path = os.path.join(
             RENDER_DIR,
-            f"page_{page_index + 1}.png"
+            f"page_{page_number}.png"
         )
 
 
@@ -577,7 +843,7 @@ async def upload_pdf(
 
 
         # -------------------------------------------------
-        # DETECT QUESTION BOXES
+        # DETECT
         # -------------------------------------------------
 
         questions = detect_question_boxes(
@@ -586,25 +852,21 @@ async def upload_pdf(
 
 
         # -------------------------------------------------
-        # CROP QUESTIONS
+        # CROP
         # -------------------------------------------------
 
         crops = crop_questions(
             page_path,
-            questions
+            questions,
+            page_number
         )
 
 
         # -------------------------------------------------
-        # ADD PAGE NUMBER
+        # ADD TO ALL QUESTIONS
         # -------------------------------------------------
 
         for crop in crops:
-
-            crop["page"] = (
-                page_index + 1
-            )
-
 
             all_questions.append(
                 crop
@@ -612,6 +874,33 @@ async def upload_pdf(
 
 
     pdf.close()
+
+
+    # =====================================================
+    # CREATE POWERPOINT
+    # =====================================================
+
+    ppt_filename = (
+        os.path.splitext(
+            safe_name
+        )[0]
+        +
+        "_Split_Questions.pptx"
+    )
+
+
+    ppt_path = os.path.join(
+        PPT_DIR,
+        ppt_filename
+    )
+
+
+    if all_questions:
+
+        create_powerpoint(
+            all_questions,
+            ppt_path
+        )
 
 
     # =====================================================
@@ -625,7 +914,7 @@ async def upload_pdf(
 
     <head>
 
-        <title>Question Detection</title>
+        <title>PDF Question Splitter</title>
 
         <style>
 
@@ -646,9 +935,25 @@ async def upload_pdf(
 
             .summary {{
                 background: #f0fdf4;
-                padding: 20px;
-                border-radius: 10px;
+                padding: 25px;
+                border-radius: 12px;
                 margin-bottom: 30px;
+            }}
+
+            .download {{
+                display: inline-block;
+                background: #16a34a;
+                color: white;
+                text-decoration: none;
+                padding: 15px 30px;
+                border-radius: 8px;
+                font-size: 18px;
+                font-weight: bold;
+                margin-top: 15px;
+            }}
+
+            .download:hover {{
+                background: #15803d;
             }}
 
             .question {{
@@ -663,11 +968,6 @@ async def upload_pdf(
                 max-width: 100%;
                 border: 1px solid #ccc;
                 margin-top: 15px;
-            }}
-
-            .number {{
-                color: #2563eb;
-                font-weight: bold;
             }}
 
         </style>
@@ -699,38 +999,48 @@ async def upload_pdf(
                         {page_count}
                     </strong>
                 </p>
-
-            </div>
     """
 
 
     # -----------------------------------------------------
-    # NO QUESTIONS
+    # POWERPOINT DOWNLOAD
     # -----------------------------------------------------
 
-    if not all_questions:
+    if all_questions:
 
-        html += """
+        html += f"""
 
-            <div class="question">
-
-                <h2>
-                    ⚠️ No questions detected
-                </h2>
-
-                <p>
-                    The system could not detect
-                    the main question markers.
-                </p>
-
-            </div>
+                <a
+                    class="download"
+                    href="/download/{ppt_filename}"
+                >
+                    ⬇️ Download PowerPoint
+                </a>
 
         """
 
 
-    # -----------------------------------------------------
+    else:
+
+        html += """
+
+                <p>
+                    ⚠️ No questions detected.
+                </p>
+
+        """
+
+
+    html += """
+
+            </div>
+
+    """
+
+
+    # =====================================================
     # SHOW QUESTIONS
-    # -----------------------------------------------------
+    # =====================================================
 
     for index, question in enumerate(
         all_questions
@@ -752,12 +1062,10 @@ async def upload_pdf(
 
 
                 <p>
-
                     Page:
                     <strong>
                         {question["page"]}
                     </strong>
-
                 </p>
 
 
@@ -784,7 +1092,7 @@ async def upload_pdf(
 
 
 # =========================================================
-# SERVE CROPPED IMAGE
+# SERVE CROP IMAGE
 # =========================================================
 
 @app.get(
@@ -793,7 +1101,6 @@ async def upload_pdf(
 def get_crop(
     filename: str
 ):
-
 
     path = os.path.join(
         CROP_DIR,
@@ -814,4 +1121,41 @@ def get_crop(
     return FileResponse(
         path,
         media_type="image/png"
+    )
+
+
+# =========================================================
+# DOWNLOAD POWERPOINT
+# =========================================================
+
+@app.get(
+    "/download/{filename}"
+)
+def download_powerpoint(
+    filename: str
+):
+
+    path = os.path.join(
+        PPT_DIR,
+        filename
+    )
+
+
+    if not os.path.exists(
+        path
+    ):
+
+        return {
+            "error":
+            "PowerPoint file not found."
+        }
+
+
+    return FileResponse(
+        path,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation"
+        ),
+        filename=filename
     )
