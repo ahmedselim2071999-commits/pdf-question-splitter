@@ -2,11 +2,8 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import HTMLResponse, FileResponse
 import fitz
 import os
-import re
 import cv2
-import pytesseract
-
-from pytesseract import Output
+import numpy as np
 
 
 app = FastAPI(title="PDF Question Splitter")
@@ -21,9 +18,9 @@ os.makedirs(RENDER_DIR, exist_ok=True)
 os.makedirs(CROP_DIR, exist_ok=True)
 
 
-# ---------------------------------------------------------
-# HOME PAGE
-# ---------------------------------------------------------
+# =========================================================
+# HOME
+# =========================================================
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -48,7 +45,7 @@ def home():
 
             .box {
                 background: white;
-                max-width: 1000px;
+                max-width: 900px;
                 margin: auto;
                 padding: 40px;
                 border-radius: 15px;
@@ -59,8 +56,12 @@ def home():
                 margin-bottom: 10px;
             }
 
-            .upload {
-                margin: 30px;
+            p {
+                color: #666;
+            }
+
+            input {
+                margin: 25px 0;
             }
 
             button {
@@ -75,20 +76,6 @@ def home():
 
             button:hover {
                 background: #1d4ed8;
-            }
-
-            .question {
-                margin-top: 40px;
-                padding: 20px;
-                border: 1px solid #ddd;
-                border-radius: 10px;
-                background: #fafafa;
-            }
-
-            .question img {
-                max-width: 100%;
-                border: 1px solid #ccc;
-                margin-top: 15px;
             }
 
         </style>
@@ -108,7 +95,6 @@ def home():
 
 
             <form
-                class="upload"
                 action="/upload"
                 method="post"
                 enctype="multipart/form-data"
@@ -137,11 +123,11 @@ def home():
     """
 
 
-# ---------------------------------------------------------
-# OCR QUESTION DETECTION
-# ---------------------------------------------------------
+# =========================================================
+# DETECT QUESTION NUMBER BOXES
+# =========================================================
 
-def detect_questions(image_path):
+def detect_question_boxes(image_path):
 
     image = cv2.imread(image_path)
 
@@ -149,190 +135,212 @@ def detect_questions(image_path):
         return []
 
 
-    # Convert image to RGB for Tesseract
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    height, width = image.shape[:2]
 
 
-    # OCR
-    data = pytesseract.image_to_data(
-        rgb,
-        output_type=Output.DICT,
-        config="--psm 6"
+    # -----------------------------------------------------
+    # Convert image to HSV
+    # -----------------------------------------------------
+
+    hsv = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2HSV
+    )
+
+
+    # -----------------------------------------------------
+    # Detect RED
+    # -----------------------------------------------------
+
+    lower_red_1 = np.array(
+        [0, 80, 80]
+    )
+
+    upper_red_1 = np.array(
+        [15, 255, 255]
+    )
+
+
+    lower_red_2 = np.array(
+        [165, 80, 80]
+    )
+
+    upper_red_2 = np.array(
+        [180, 255, 255]
+    )
+
+
+    mask1 = cv2.inRange(
+        hsv,
+        lower_red_1,
+        upper_red_1
+    )
+
+
+    mask2 = cv2.inRange(
+        hsv,
+        lower_red_2,
+        upper_red_2
+    )
+
+
+    red_mask = mask1 | mask2
+
+
+    # -----------------------------------------------------
+    # Clean mask
+    # -----------------------------------------------------
+
+    kernel = np.ones(
+        (3, 3),
+        np.uint8
+    )
+
+
+    red_mask = cv2.morphologyEx(
+        red_mask,
+        cv2.MORPH_CLOSE,
+        kernel
+    )
+
+
+    # -----------------------------------------------------
+    # Find contours
+    # -----------------------------------------------------
+
+    contours, _ = cv2.findContours(
+        red_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
     )
 
 
     candidates = []
 
 
-    for i in range(len(data["text"])):
+    for contour in contours:
 
-        text = data["text"][i].strip()
+        x, y, w, h = cv2.boundingRect(contour)
 
-        if not text:
+
+        area = w * h
+
+
+        # -------------------------------------------------
+        # Main question number boxes are relatively small.
+        # -------------------------------------------------
+
+        if area < 150:
             continue
 
 
-        try:
-            confidence = float(data["conf"][i])
-        except:
-            confidence = 0
-
-
-        if confidence < 20:
+        if area > 5000:
             continue
 
 
-        x = int(data["left"][i])
-        y = int(data["top"][i])
-        w = int(data["width"][i])
-        h = int(data["height"][i])
+        # -------------------------------------------------
+        # Ignore extremely wide red labels.
+        # -------------------------------------------------
+
+        if w > 100:
+            continue
 
 
-        # Only simple integer numbers.
+        if h > 100:
+            continue
+
+
+        # -------------------------------------------------
+        # Question number boxes are close to square.
+        # -------------------------------------------------
+
+        ratio = w / float(h)
+
+
+        if ratio < 0.5 or ratio > 2.0:
+            continue
+
+
+        # -------------------------------------------------
+        # Main question numbers are on the left side.
+        # -------------------------------------------------
+
+        if x > width * 0.25:
+            continue
+
+
+        # -------------------------------------------------
+        # Ignore things at the extreme top.
         #
-        # This intentionally avoids:
-        # (1)
-        # (2)
-        # 1.2
-        # 2026
-        #
-        if not re.fullmatch(r"\d{1,2}", text):
-            continue
+        # This removes the large red Lesson box.
+        # -------------------------------------------------
 
-
-        number = int(text)
-
-
-        # Main question numbers are normally
-        # located near the left side of the content.
-        if x > image.shape[1] * 0.25:
-            continue
-
-
-        # Ignore tiny numbers
-        if h < 10:
+        if y < height * 0.15:
             continue
 
 
         candidates.append({
-            "number": number,
             "x": x,
             "y": y,
             "w": w,
             "h": h,
-            "confidence": confidence
+            "area": area
         })
 
 
     # -----------------------------------------------------
-    # VISUAL CHECK
-    #
-    # Main question numbers in the example are inside
-    # red boxes. We use the amount of red around the
-    # detected number as an additional confidence signal.
+    # Sort vertically
     # -----------------------------------------------------
 
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-
-    # Red color ranges
-    mask1 = cv2.inRange(
-        hsv,
-        (0, 70, 70),
-        (15, 255, 255)
+    candidates.sort(
+        key=lambda item: item["y"]
     )
 
-    mask2 = cv2.inRange(
-        hsv,
-        (165, 70, 70),
-        (180, 255, 255)
-    )
-
-    red_mask = mask1 | mask2
-
-
-    final_candidates = []
-
-
-    for item in candidates:
-
-        x = item["x"]
-        y = item["y"]
-        w = item["w"]
-        h = item["h"]
-
-
-        # Expand around the OCR number
-        pad = max(8, int(h * 0.5))
-
-
-        x1 = max(0, x - pad)
-        y1 = max(0, y - pad)
-        x2 = min(image.shape[1], x + w + pad)
-        y2 = min(image.shape[0], y + h + pad)
-
-
-        region = red_mask[y1:y2, x1:x2]
-
-
-        if region.size == 0:
-            continue
-
-
-        red_ratio = cv2.countNonZero(region) / region.size
-
-
-        # Red box increases confidence.
-        if red_ratio > 0.08:
-            item["visual_score"] = red_ratio
-            final_candidates.append(item)
-
 
     # -----------------------------------------------------
-    # SORT BY VERTICAL POSITION
-    # -----------------------------------------------------
-
-    final_candidates.sort(key=lambda q: q["y"])
-
-
-    # -----------------------------------------------------
-    # REMOVE DUPLICATES
+    # Remove duplicates
     # -----------------------------------------------------
 
     questions = []
 
 
-    for candidate in final_candidates:
+    for candidate in candidates:
 
         if not questions:
+
             questions.append(candidate)
+
             continue
 
 
         previous = questions[-1]
 
 
-        # Same question detected more than once
-        if abs(candidate["y"] - previous["y"]) < 30:
+        if abs(
+            candidate["y"] - previous["y"]
+        ) < 40:
 
-            # Keep the stronger candidate
-            if candidate["confidence"] > previous["confidence"]:
+            # Keep larger box
+            if candidate["area"] > previous["area"]:
+
                 questions[-1] = candidate
 
-            continue
+        else:
 
-
-        questions.append(candidate)
+            questions.append(candidate)
 
 
     return questions
 
 
-# ---------------------------------------------------------
+# =========================================================
 # CROP QUESTIONS
-# ---------------------------------------------------------
+# =========================================================
 
-def crop_questions(image_path, questions):
+def crop_questions(
+    image_path,
+    questions
+):
 
     image = cv2.imread(image_path)
 
@@ -348,28 +356,47 @@ def crop_questions(image_path, questions):
 
     for index, question in enumerate(questions):
 
+        # -------------------------------------------------
+        # Start slightly above question number
+        # -------------------------------------------------
+
         top = max(
             0,
             question["y"] - 20
         )
 
 
+        # -------------------------------------------------
+        # End before next main question
+        # -------------------------------------------------
+
         if index < len(questions) - 1:
 
             next_question = questions[index + 1]
 
-            bottom = next_question["y"] - 15
+            bottom = max(
+                top + 50,
+                next_question["y"] - 15
+            )
 
         else:
 
             bottom = height - 20
 
 
+        # -------------------------------------------------
+        # Safety check
+        # -------------------------------------------------
+
         if bottom <= top:
+
             continue
 
 
-        crop = image[top:bottom, :]
+        crop = image[
+            top:bottom,
+            0:width
+        ]
 
 
         crop_path = os.path.join(
@@ -385,7 +412,7 @@ def crop_questions(image_path, questions):
 
 
         crops.append({
-            "number": question["number"],
+            "number": index + 1,
             "path": crop_path
         })
 
@@ -393,12 +420,17 @@ def crop_questions(image_path, questions):
     return crops
 
 
-# ---------------------------------------------------------
+# =========================================================
 # UPLOAD + ANALYZE
-# ---------------------------------------------------------
+# =========================================================
 
-@app.post("/upload", response_class=HTMLResponse)
-async def upload_pdf(file: UploadFile = File(...)):
+@app.post(
+    "/upload",
+    response_class=HTMLResponse
+)
+async def upload_pdf(
+    file: UploadFile = File(...)
+):
 
     if not file.filename.lower().endswith(".pdf"):
 
@@ -407,41 +439,56 @@ async def upload_pdf(file: UploadFile = File(...)):
         """
 
 
-    # Save PDF
+    # -----------------------------------------------------
+    # Save uploaded PDF
+    # -----------------------------------------------------
+
     file_path = os.path.join(
         UPLOAD_DIR,
         file.filename
     )
 
 
-    with open(file_path, "wb") as buffer:
+    with open(
+        file_path,
+        "wb"
+    ) as buffer:
 
         buffer.write(
             await file.read()
         )
 
 
+    # -----------------------------------------------------
     # Open PDF
-    pdf = fitz.open(file_path)
+    # -----------------------------------------------------
+
+    pdf = fitz.open(
+        file_path
+    )
 
 
     page_count = len(pdf)
 
 
-    # -----------------------------------------------------
-    # FOR V1:
-    # Process every page.
-    # -----------------------------------------------------
-
     all_questions = []
 
 
-    for page_index in range(page_count):
+    # -----------------------------------------------------
+    # Process every page
+    # -----------------------------------------------------
+
+    for page_index in range(
+        page_count
+    ):
 
         page = pdf[page_index]
 
 
-        # High-resolution rendering
+        # -------------------------------------------------
+        # High resolution
+        # -------------------------------------------------
+
         matrix = fitz.Matrix(
             2.5,
             2.5
@@ -460,16 +507,24 @@ async def upload_pdf(file: UploadFile = File(...)):
         )
 
 
-        pix.save(page_path)
-
-
-        # Detect questions
-        questions = detect_questions(
+        pix.save(
             page_path
         )
 
 
-        # Crop questions
+        # -------------------------------------------------
+        # Detect main question boxes
+        # -------------------------------------------------
+
+        questions = detect_question_boxes(
+            page_path
+        )
+
+
+        # -------------------------------------------------
+        # Crop
+        # -------------------------------------------------
+
         crops = crop_questions(
             page_path,
             questions
@@ -480,15 +535,17 @@ async def upload_pdf(file: UploadFile = File(...)):
 
             crop["page"] = page_index + 1
 
-            all_questions.append(crop)
+            all_questions.append(
+                crop
+            )
 
 
     pdf.close()
 
 
-    # -----------------------------------------------------
-    # BUILD RESULT PAGE
-    # -----------------------------------------------------
+    # =====================================================
+    # RESULT PAGE
+    # =====================================================
 
     html = f"""
     <!DOCTYPE html>
@@ -516,6 +573,13 @@ async def upload_pdf(file: UploadFile = File(...)):
                 box-shadow: 0 5px 25px rgba(0,0,0,0.1);
             }}
 
+            .summary {{
+                padding: 20px;
+                background: #f0fdf4;
+                border-radius: 10px;
+                margin-bottom: 30px;
+            }}
+
             .question {{
                 margin-top: 35px;
                 padding: 20px;
@@ -530,13 +594,10 @@ async def upload_pdf(file: UploadFile = File(...)):
                 border: 1px solid #ccc;
             }}
 
-            .success {{
-                color: #15803d;
-            }}
-
         </style>
 
     </head>
+
 
     <body>
 
@@ -544,28 +605,50 @@ async def upload_pdf(file: UploadFile = File(...)):
 
             <h1>🧠 Question Detection</h1>
 
-            <h2 class="success">
-                ✅ {len(all_questions)} questions detected
-            </h2>
 
-            <p>
-                PDF pages: {page_count}
-            </p>
+            <div class="summary">
+
+                <h2>
+                    ✅ {len(all_questions)} questions detected
+                </h2>
+
+                <p>
+                    PDF pages:
+                    <strong>{page_count}</strong>
+                </p>
+
+            </div>
     """
 
 
     if not all_questions:
 
         html += """
-            <h2>⚠️ No questions detected.</h2>
 
-            <p>
-                We will improve the detection algorithm.
-            </p>
+            <div class="question">
+
+                <h2>
+                    ⚠️ No questions detected
+                </h2>
+
+                <p>
+                    The detection algorithm did not find
+                    the expected question markers.
+                </p>
+
+            </div>
+
         """
 
 
-    for index, question in enumerate(all_questions):
+    for index, question in enumerate(
+        all_questions
+    ):
+
+        filename = os.path.basename(
+            question["path"]
+        )
+
 
         html += f"""
 
@@ -576,15 +659,14 @@ async def upload_pdf(file: UploadFile = File(...)):
                 </h2>
 
                 <p>
-                    Detected number:
-                    <strong>{question["number"]}</strong>
-                    |
                     Page:
-                    <strong>{question["page"]}</strong>
+                    <strong>
+                        {question["page"]}
+                    </strong>
                 </p>
 
                 <img
-                    src="/crop/{os.path.basename(question["path"])}"
+                    src="/crop/{filename}"
                 >
 
             </div>
@@ -605,12 +687,16 @@ async def upload_pdf(file: UploadFile = File(...)):
     return html
 
 
-# ---------------------------------------------------------
-# SERVE CROPPED IMAGES
-# ---------------------------------------------------------
+# =========================================================
+# SERVE CROP
+# =========================================================
 
-@app.get("/crop/{filename}")
-def get_crop(filename):
+@app.get(
+    "/crop/{filename}"
+)
+def get_crop(
+    filename: str
+):
 
     path = os.path.join(
         CROP_DIR,
