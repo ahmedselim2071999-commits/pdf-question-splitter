@@ -9,6 +9,10 @@ import numpy as np
 app = FastAPI(title="PDF Question Splitter")
 
 
+# =========================================================
+# DIRECTORIES
+# =========================================================
+
 UPLOAD_DIR = "uploads"
 RENDER_DIR = "rendered"
 CROP_DIR = "crops"
@@ -19,7 +23,7 @@ os.makedirs(CROP_DIR, exist_ok=True)
 
 
 # =========================================================
-# HOME
+# HOME PAGE
 # =========================================================
 
 @app.get("/", response_class=HTMLResponse)
@@ -90,7 +94,8 @@ def home():
             <h1>📚 PDF Question Splitter</h1>
 
             <p>
-                Upload a PDF and automatically detect individual questions.
+                Upload a PDF and automatically split
+                the main questions.
             </p>
 
 
@@ -124,7 +129,7 @@ def home():
 
 
 # =========================================================
-# DETECT QUESTION NUMBER BOXES
+# DETECT MAIN QUESTION NUMBER BOXES
 # =========================================================
 
 def detect_question_boxes(image_path):
@@ -149,20 +154,20 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # Detect RED
+    # RED COLOR RANGES
     # -----------------------------------------------------
 
     lower_red_1 = np.array(
-        [0, 80, 80]
+        [0, 100, 80]
     )
 
     upper_red_1 = np.array(
-        [15, 255, 255]
+        [12, 255, 255]
     )
 
 
     lower_red_2 = np.array(
-        [165, 80, 80]
+        [168, 100, 80]
     )
 
     upper_red_2 = np.array(
@@ -188,11 +193,11 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # Clean mask
+    # CLOSE SMALL HOLES
     # -----------------------------------------------------
 
     kernel = np.ones(
-        (3, 3),
+        (5, 5),
         np.uint8
     )
 
@@ -205,7 +210,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # Find contours
+    # FIND RED OBJECTS
     # -----------------------------------------------------
 
     contours, _ = cv2.findContours(
@@ -220,49 +225,69 @@ def detect_question_boxes(image_path):
 
     for contour in contours:
 
-        x, y, w, h = cv2.boundingRect(contour)
+        x, y, w, h = cv2.boundingRect(
+            contour
+        )
 
 
-        area = w * h
+        box_area = w * h
 
 
-        # -------------------------------------------------
-        # Main question number boxes are relatively small.
-        # -------------------------------------------------
-
-        if area < 150:
+        if box_area <= 0:
             continue
 
 
-        if area > 5000:
+        contour_area = cv2.contourArea(
+            contour
+        )
+
+
+        fill_ratio = (
+            contour_area /
+            float(box_area)
+        )
+
+
+        aspect_ratio = (
+            w /
+            float(h)
+        )
+
+
+        # -------------------------------------------------
+        # SIZE FILTER
+        # -------------------------------------------------
+
+        if w < 25 or h < 25:
+            continue
+
+
+        if w > 120 or h > 120:
             continue
 
 
         # -------------------------------------------------
-        # Ignore extremely wide red labels.
+        # SQUARE FILTER
         # -------------------------------------------------
 
-        if w > 100:
+        if aspect_ratio < 0.70:
             continue
 
 
-        if h > 100:
-            continue
-
-
-        # -------------------------------------------------
-        # Question number boxes are close to square.
-        # -------------------------------------------------
-
-        ratio = w / float(h)
-
-
-        if ratio < 0.5 or ratio > 2.0:
+        if aspect_ratio > 1.40:
             continue
 
 
         # -------------------------------------------------
-        # Main question numbers are on the left side.
+        # FILLED RED BOX
+        # -------------------------------------------------
+
+        if fill_ratio < 0.55:
+            continue
+
+
+        # -------------------------------------------------
+        # LEFT SIDE
         # -------------------------------------------------
 
         if x > width * 0.25:
@@ -270,9 +295,7 @@ def detect_question_boxes(image_path):
 
 
         # -------------------------------------------------
-        # Ignore things at the extreme top.
-        #
-        # This removes the large red Lesson box.
+        # DON'T DETECT HEADER
         # -------------------------------------------------
 
         if y < height * 0.15:
@@ -284,12 +307,13 @@ def detect_question_boxes(image_path):
             "y": y,
             "w": w,
             "h": h,
-            "area": area
+            "area": box_area,
+            "fill_ratio": fill_ratio
         })
 
 
     # -----------------------------------------------------
-    # Sort vertically
+    # SORT TOP → BOTTOM
     # -----------------------------------------------------
 
     candidates.sort(
@@ -298,7 +322,7 @@ def detect_question_boxes(image_path):
 
 
     # -----------------------------------------------------
-    # Remove duplicates
+    # REMOVE DUPLICATES
     # -----------------------------------------------------
 
     questions = []
@@ -306,28 +330,42 @@ def detect_question_boxes(image_path):
 
     for candidate in candidates:
 
-        if not questions:
-
-            questions.append(candidate)
-
-            continue
+        duplicate = False
 
 
-        previous = questions[-1]
+        for existing in questions:
+
+            if (
+                abs(
+                    candidate["x"] -
+                    existing["x"]
+                ) < 25
+                and
+                abs(
+                    candidate["y"] -
+                    existing["y"]
+                ) < 25
+            ):
+
+                duplicate = True
+
+                break
 
 
-        if abs(
-            candidate["y"] - previous["y"]
-        ) < 40:
+        if not duplicate:
 
-            # Keep larger box
-            if candidate["area"] > previous["area"]:
+            questions.append(
+                candidate
+            )
 
-                questions[-1] = candidate
 
-        else:
+    # -----------------------------------------------------
+    # FINAL SORT
+    # -----------------------------------------------------
 
-            questions.append(candidate)
+    questions.sort(
+        key=lambda item: item["y"]
+    )
 
 
     return questions
@@ -342,7 +380,10 @@ def crop_questions(
     questions
 ):
 
-    image = cv2.imread(image_path)
+    image = cv2.imread(
+        image_path
+    )
+
 
     if image is None:
         return []
@@ -354,50 +395,63 @@ def crop_questions(
     crops = []
 
 
-    for index, question in enumerate(questions):
+    for index, question in enumerate(
+        questions
+    ):
+
 
         # -------------------------------------------------
-        # Start slightly above question number
+        # TOP OF QUESTION
         # -------------------------------------------------
 
         top = max(
             0,
-            question["y"] - 20
+            question["y"] - 25
         )
 
 
         # -------------------------------------------------
-        # End before next main question
+        # BOTTOM OF QUESTION
         # -------------------------------------------------
 
         if index < len(questions) - 1:
 
-            next_question = questions[index + 1]
+            next_question = (
+                questions[index + 1]
+            )
+
 
             bottom = max(
-                top + 50,
-                next_question["y"] - 15
+                top + 100,
+                next_question["y"] - 20
             )
 
         else:
 
-            bottom = height - 20
+            bottom = height - 25
 
 
         # -------------------------------------------------
-        # Safety check
+        # SAFETY
         # -------------------------------------------------
 
         if bottom <= top:
-
             continue
 
+
+        # -------------------------------------------------
+        # CREATE CROP
+        # -------------------------------------------------
 
         crop = image[
             top:bottom,
             0:width
         ]
 
+
+        # -------------------------------------------------
+        # SAVE CROP
+        # -------------------------------------------------
 
         crop_path = os.path.join(
             CROP_DIR,
@@ -421,7 +475,7 @@ def crop_questions(
 
 
 # =========================================================
-# UPLOAD + ANALYZE
+# UPLOAD PDF
 # =========================================================
 
 @app.post(
@@ -432,7 +486,14 @@ async def upload_pdf(
     file: UploadFile = File(...)
 ):
 
-    if not file.filename.lower().endswith(".pdf"):
+
+    # -----------------------------------------------------
+    # CHECK PDF
+    # -----------------------------------------------------
+
+    if not file.filename.lower().endswith(
+        ".pdf"
+    ):
 
         return """
         <h2>❌ Please upload a PDF file.</h2>
@@ -440,7 +501,7 @@ async def upload_pdf(
 
 
     # -----------------------------------------------------
-    # Save uploaded PDF
+    # SAVE PDF
     # -----------------------------------------------------
 
     file_path = os.path.join(
@@ -460,7 +521,7 @@ async def upload_pdf(
 
 
     # -----------------------------------------------------
-    # Open PDF
+    # OPEN PDF
     # -----------------------------------------------------
 
     pdf = fitz.open(
@@ -474,19 +535,22 @@ async def upload_pdf(
     all_questions = []
 
 
-    # -----------------------------------------------------
-    # Process every page
-    # -----------------------------------------------------
+    # =====================================================
+    # PROCESS EVERY PAGE
+    # =====================================================
 
     for page_index in range(
         page_count
     ):
 
-        page = pdf[page_index]
+
+        page = pdf[
+            page_index
+        ]
 
 
         # -------------------------------------------------
-        # High resolution
+        # HIGH QUALITY RENDER
         # -------------------------------------------------
 
         matrix = fitz.Matrix(
@@ -513,7 +577,7 @@ async def upload_pdf(
 
 
         # -------------------------------------------------
-        # Detect main question boxes
+        # DETECT QUESTION BOXES
         # -------------------------------------------------
 
         questions = detect_question_boxes(
@@ -522,7 +586,7 @@ async def upload_pdf(
 
 
         # -------------------------------------------------
-        # Crop
+        # CROP QUESTIONS
         # -------------------------------------------------
 
         crops = crop_questions(
@@ -531,9 +595,16 @@ async def upload_pdf(
         )
 
 
+        # -------------------------------------------------
+        # ADD PAGE NUMBER
+        # -------------------------------------------------
+
         for crop in crops:
 
-            crop["page"] = page_index + 1
+            crop["page"] = (
+                page_index + 1
+            )
+
 
             all_questions.append(
                 crop
@@ -554,7 +625,7 @@ async def upload_pdf(
 
     <head>
 
-        <title>Detected Questions</title>
+        <title>Question Detection</title>
 
         <style>
 
@@ -574,8 +645,8 @@ async def upload_pdf(
             }}
 
             .summary {{
-                padding: 20px;
                 background: #f0fdf4;
+                padding: 20px;
                 border-radius: 10px;
                 margin-bottom: 30px;
             }}
@@ -590,8 +661,13 @@ async def upload_pdf(
 
             .question img {{
                 max-width: 100%;
-                margin-top: 15px;
                 border: 1px solid #ccc;
+                margin-top: 15px;
+            }}
+
+            .number {{
+                color: #2563eb;
+                font-weight: bold;
             }}
 
         </style>
@@ -603,23 +679,34 @@ async def upload_pdf(
 
         <div class="container">
 
-            <h1>🧠 Question Detection</h1>
+
+            <h1>
+                🧠 Question Detection
+            </h1>
 
 
             <div class="summary">
 
                 <h2>
-                    ✅ {len(all_questions)} questions detected
+                    ✅ {len(all_questions)}
+                    questions detected
                 </h2>
+
 
                 <p>
                     PDF pages:
-                    <strong>{page_count}</strong>
+                    <strong>
+                        {page_count}
+                    </strong>
                 </p>
 
             </div>
     """
 
+
+    # -----------------------------------------------------
+    # NO QUESTIONS
+    # -----------------------------------------------------
 
     if not all_questions:
 
@@ -632,8 +719,8 @@ async def upload_pdf(
                 </h2>
 
                 <p>
-                    The detection algorithm did not find
-                    the expected question markers.
+                    The system could not detect
+                    the main question markers.
                 </p>
 
             </div>
@@ -641,9 +728,14 @@ async def upload_pdf(
         """
 
 
+    # -----------------------------------------------------
+    # SHOW QUESTIONS
+    # -----------------------------------------------------
+
     for index, question in enumerate(
         all_questions
     ):
+
 
         filename = os.path.basename(
             question["path"]
@@ -658,12 +750,16 @@ async def upload_pdf(
                     Question {index + 1}
                 </h2>
 
+
                 <p>
+
                     Page:
                     <strong>
                         {question["page"]}
                     </strong>
+
                 </p>
+
 
                 <img
                     src="/crop/{filename}"
@@ -688,7 +784,7 @@ async def upload_pdf(
 
 
 # =========================================================
-# SERVE CROP
+# SERVE CROPPED IMAGE
 # =========================================================
 
 @app.get(
@@ -698,16 +794,20 @@ def get_crop(
     filename: str
 ):
 
+
     path = os.path.join(
         CROP_DIR,
         filename
     )
 
 
-    if not os.path.exists(path):
+    if not os.path.exists(
+        path
+    ):
 
         return {
-            "error": "Image not found."
+            "error":
+            "Image not found."
         }
 
 
